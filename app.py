@@ -4,8 +4,12 @@ import random
 import re
 import sys
 import threading
+import zipfile
+from datetime import datetime, timezone
+from posixpath import normpath
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape
 import tkinter as tk
-from tkinter import ttk
 
 APP_NAME = "Username Shuffler"
 APP_VERSION = "v2.0.0"
@@ -16,7 +20,7 @@ HEADER = "#0F172A"
 CARD = "#FFFFFF"
 CARD_BORDER = "#D8E2F1"
 SHADOW = "#C7D2FE"
-TEXT = "#111827"
+TEXT = "#0F172A"
 MUTED = "#64748B"
 PRIMARY = "#2563EB"
 PRIMARY_HOVER = "#1D4ED8"
@@ -26,11 +30,18 @@ CYAN = "#0891B2"
 CYAN_HOVER = "#0E7490"
 ORANGE = "#EA580C"
 ORANGE_HOVER = "#C2410C"
-RED = "#DC2626"
+SLATE = "#475569"
+SLATE_HOVER = "#334155"
+
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def qn(namespace: str, tag: str) -> str:
+    return f"{{{namespace}}}{tag}"
 
 
 def resource_path(relative_path: str) -> str:
-    """Return resource path for normal Python and PyInstaller builds."""
     try:
         base_path = sys._MEIPASS  # type: ignore[attr-defined]
     except Exception:
@@ -39,7 +50,6 @@ def resource_path(relative_path: str) -> str:
 
 
 def get_app_folder() -> str:
-    """Return the folder where the exe or py file is located."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +65,7 @@ def clean_username(value) -> str:
 
 
 def find_data_file(folder: str) -> str | None:
-    files = []
+    files: list[str] = []
     for file_name in os.listdir(folder):
         lower = file_name.lower()
         if file_name.startswith("~$") or file_name.startswith("."):
@@ -66,7 +76,7 @@ def find_data_file(folder: str) -> str | None:
     if not files:
         return None
 
-    priority = ["usernames.xlsx", "usernames.csv", "username.xlsx", "username.csv"]
+    priority = ["usernames.xlsx", "usernames.xlsm", "usernames.csv", "username.xlsx", "username.csv"]
     for preferred in priority:
         for file_name in files:
             if file_name.lower() == preferred:
@@ -99,40 +109,95 @@ def read_csv_file(path: str) -> list[str]:
     return usernames
 
 
+def _relationship_target(base_folder: str, target: str) -> str:
+    if target.startswith("/"):
+        return normpath(target.lstrip("/"))
+    return normpath(f"{base_folder}/{target}")
+
+
+def _first_worksheet_path(zf: zipfile.ZipFile) -> str:
+    workbook_xml = ET.fromstring(zf.read("xl/workbook.xml"))
+    sheets = workbook_xml.find(qn(MAIN_NS, "sheets"))
+    if sheets is None or not list(sheets):
+        raise RuntimeError("No worksheet found inside this Excel file.")
+
+    first_sheet = list(sheets)[0]
+    relationship_id = first_sheet.attrib.get(qn(REL_NS, "id"))
+    if not relationship_id:
+        return "xl/worksheets/sheet1.xml"
+
+    rels_xml = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    for rel in rels_xml:
+        if rel.attrib.get("Id") == relationship_id:
+            return _relationship_target("xl", rel.attrib.get("Target", "worksheets/sheet1.xml"))
+
+    return "xl/worksheets/sheet1.xml"
+
+
+def _read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in zf.namelist():
+        return []
+
+    root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    values: list[str] = []
+    for item in root.findall(qn(MAIN_NS, "si")):
+        pieces: list[str] = []
+        for text_node in item.iter(qn(MAIN_NS, "t")):
+            pieces.append(text_node.text or "")
+        values.append("".join(pieces))
+    return values
+
+
+def read_xlsx_file(path: str) -> list[str]:
+    usernames: list[str] = []
+
+    with zipfile.ZipFile(path, "r") as zf:
+        shared_strings = _read_shared_strings(zf)
+        sheet_path = _first_worksheet_path(zf)
+        if sheet_path not in zf.namelist():
+            raise RuntimeError("Could not find the first worksheet inside this Excel file.")
+
+        root = ET.fromstring(zf.read(sheet_path))
+        sheet_data = root.find(qn(MAIN_NS, "sheetData"))
+        if sheet_data is None:
+            return []
+
+        for row in sheet_data.findall(qn(MAIN_NS, "row")):
+            for cell in row.findall(qn(MAIN_NS, "c")):
+                cell_type = cell.attrib.get("t", "")
+                value = ""
+
+                if cell_type == "s":
+                    node = cell.find(qn(MAIN_NS, "v"))
+                    if node is not None and node.text is not None:
+                        try:
+                            value = shared_strings[int(node.text)]
+                        except (ValueError, IndexError):
+                            value = ""
+                elif cell_type == "inlineStr":
+                    pieces: list[str] = []
+                    inline = cell.find(qn(MAIN_NS, "is"))
+                    if inline is not None:
+                        for text_node in inline.iter(qn(MAIN_NS, "t")):
+                            pieces.append(text_node.text or "")
+                    value = "".join(pieces)
+                else:
+                    node = cell.find(qn(MAIN_NS, "v"))
+                    value = node.text if node is not None and node.text is not None else ""
+
+                name = clean_username(value)
+                if name:
+                    usernames.append(name)
+
+    return usernames
+
+
 def read_excel_file(path: str) -> list[str]:
     lower = path.lower()
-
     if lower.endswith((".xlsx", ".xlsm")):
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(path, read_only=True, data_only=True)
-        try:
-            sheet = workbook.active
-            usernames: list[str] = []
-            for row in sheet.iter_rows(values_only=True):
-                for cell in row:
-                    name = clean_username(cell)
-                    if name:
-                        usernames.append(name)
-            return usernames
-        finally:
-            workbook.close()
-
+        return read_xlsx_file(path)
     if lower.endswith(".xls"):
-        try:
-            import pandas as pd  # Optional fallback for old Excel files.
-        except Exception as exc:
-            raise RuntimeError(
-                "Old .xls files need pandas/xlrd. Please save the sheet as .xlsx or .csv."
-            ) from exc
-
-        frame = pd.read_excel(path, header=None)
-        return [
-            name
-            for name in (clean_username(value) for value in frame.values.flatten().tolist())
-            if name
-        ]
-
+        raise RuntimeError("Old .xls files are not supported. Save it as .xlsx or .csv and reload.")
     raise RuntimeError("Unsupported file type.")
 
 
@@ -147,6 +212,9 @@ def load_usernames_from_folder(folder: str) -> tuple[list[str], str | None, str 
     else:
         usernames = read_excel_file(path)
 
+    if not usernames:
+        return [], path, "The selected file has no usernames yet. Add usernames below and save."
+
     return usernames, path, None
 
 
@@ -156,12 +224,58 @@ def parse_new_usernames(raw_text: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # Each line can be one username, or a comma/semicolon separated batch.
         parts.extend(re.split(r"[,;]+", line))
     return [name for name in (clean_username(part) for part in parts) if name]
 
 
-def append_usernames_to_file(path: str, names: list[str]) -> str:
+def write_simple_xlsx(path: str, names: list[str]) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    rows: list[str] = []
+    for row_index, name in enumerate(names, start=1):
+        safe = escape(name, {"\"": "&quot;"})
+        rows.append(
+            f'<row r="{row_index}"><c r="A{row_index}" t="inlineStr"><is><t xml:space="preserve">{safe}</t></is></c></row>'
+        )
+    sheet_xml = "".join(rows)
+    dimension = f"A1:A{max(1, len(names))}"
+
+    files = {
+        "[Content_Types].xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>''',
+        "_rels/.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>''',
+        "docProps/app.xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Username Shuffler</Application></Properties>''',
+        "docProps/core.xml": f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>Username Shuffler</dc:creator><cp:lastModifiedBy>Username Shuffler</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified></cp:coreProperties>''',
+        "xl/workbook.xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Usernames" sheetId="1" r:id="rId1"/></sheets></workbook>''',
+        "xl/_rels/workbook.xml.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>''',
+        "xl/styles.xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>''',
+        "xl/worksheets/sheet1.xml": f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="{dimension}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="1" width="36" customWidth="1"/></cols><sheetData>{sheet_xml}</sheetData></worksheet>''',
+    }
+
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for file_name, content in files.items():
+            zf.writestr(file_name, content)
+
+
+def append_usernames_to_file(path: str, names: list[str], existing_names: list[str] | None = None) -> str:
     lower = path.lower()
 
     if lower.endswith(".csv"):
@@ -172,7 +286,12 @@ def append_usernames_to_file(path: str, names: list[str]) -> str:
         return path
 
     if lower.endswith((".xlsx", ".xlsm")):
-        from openpyxl import Workbook, load_workbook
+        try:
+            from openpyxl import Workbook, load_workbook  # type: ignore
+        except Exception:
+            combined = list(existing_names or []) + names
+            write_simple_xlsx(path, combined)
+            return path
 
         if os.path.exists(path):
             workbook = load_workbook(path)
@@ -189,9 +308,10 @@ def append_usernames_to_file(path: str, names: list[str]) -> str:
         workbook.close()
         return path
 
-    # Do not write back to .xls. Create a modern sheet instead.
     new_path = os.path.join(get_app_folder(), "usernames.xlsx")
-    return append_usernames_to_file(new_path, names)
+    write_simple_xlsx(new_path, list(existing_names or []) + names)
+    return new_path
+
 
 
 class UsernameShufflerApp:
@@ -201,7 +321,7 @@ class UsernameShufflerApp:
         self.usernames: list[str] = []
         self.loaded_file: str | None = None
         self.result_text = ""
-        self.load_error: str | None = None
+
         self.count_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Starting...")
         self.file_var = tk.StringVar(value="Looking for sheet...")
@@ -217,17 +337,42 @@ class UsernameShufflerApp:
 
     def configure_window(self) -> None:
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("860x650")
-        self.root.minsize(780, 600)
+        self.root.geometry("980x640")
+        self.root.minsize(900, 560)
         self.root.configure(bg=BG)
 
-        icon_ico = resource_path("icon.ico")
-        icon_png = resource_path("icon.png")
+        self._icon_handles = []
+        self.apply_window_icon()
+        # Windows/Tk sometimes paints the default title-bar icon first.
+        # Re-applying after the window is ready keeps the custom icon in the title bar.
+        self.root.after(50, self.apply_window_icon)
+        self.root.after(300, self.apply_window_icon)
+        self.root.after(1000, self.apply_window_icon)
+
+    def apply_window_icon(self) -> None:
+        """Apply the custom icon to Tk, the Windows wrapper window, and the EXE/taskbar path.
+
+        Tk on Windows can keep showing the default feather icon if WM_SETICON is sent to
+        the child window instead of the real top-level wrapper, so this sends it to every
+        related HWND we can safely reach.
+        """
+        titlebar_ico = os.path.normpath(resource_path("titlebar.ico"))
+        icon_ico = os.path.normpath(resource_path("icon.ico"))
+        icon_png = os.path.normpath(resource_path("icon.png"))
+        preferred_ico = titlebar_ico if os.path.exists(titlebar_ico) else icon_ico
+
         try:
-            if os.path.exists(icon_ico):
-                self.root.iconbitmap(icon_ico)
+            if os.path.exists(preferred_ico):
+                self.root.iconbitmap(default=preferred_ico)
+                self.root.wm_iconbitmap(default=preferred_ico)
         except Exception:
-            pass
+            try:
+                if os.path.exists(icon_ico):
+                    self.root.iconbitmap(default=icon_ico)
+                    self.root.wm_iconbitmap(default=icon_ico)
+            except Exception:
+                pass
+
         try:
             if os.path.exists(icon_png):
                 self.window_icon = tk.PhotoImage(file=icon_png)
@@ -235,26 +380,128 @@ class UsernameShufflerApp:
         except Exception:
             pass
 
+        if os.name != "nt" or not os.path.exists(preferred_ico):
+            return
+
+        try:
+            self.root.update_idletasks()
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x00000010
+            WM_SETICON = 0x0080
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            ICON_SMALL2 = 2
+            GA_ROOT = 2
+
+            hwnd = int(self.root.winfo_id())
+            candidates = []
+            for handle in (
+                hwnd,
+                user32.GetParent(hwnd),
+                user32.GetAncestor(hwnd, GA_ROOT),
+            ):
+                if handle and handle not in candidates:
+                    candidates.append(handle)
+
+            small_icon = user32.LoadImageW(None, preferred_ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            big_icon = user32.LoadImageW(None, preferred_ico, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+
+            for handle in candidates:
+                if small_icon:
+                    user32.SendMessageW(handle, WM_SETICON, ICON_SMALL, small_icon)
+                    user32.SendMessageW(handle, WM_SETICON, ICON_SMALL2, small_icon)
+                if big_icon:
+                    user32.SendMessageW(handle, WM_SETICON, ICON_BIG, big_icon)
+
+            if small_icon:
+                self._icon_handles.append(small_icon)
+            if big_icon:
+                self._icon_handles.append(big_icon)
+        except Exception:
+            pass
+
     def build_ui(self) -> None:
         self.root.grid_rowconfigure(1, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-
         self.build_header()
 
         body = tk.Frame(self.root, bg=BG)
-        body.grid(row=1, column=0, sticky="nsew", padx=22, pady=18)
+        body.grid(row=1, column=0, sticky="nsew", padx=16, pady=12)
         body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=3)
+        body.grid_rowconfigure(1, weight=2)
 
-        self.build_stats_card(body)
-        self.build_shuffle_card(body)
-        self.build_result_card(body)
-        self.build_add_card(body)
+        # TOP AREA: result and copy are permanently visible in the default window.
+        top = tk.Frame(body, bg=BG)
+        top.grid(row=0, column=0, sticky="nsew")
+        top.grid_columnconfigure(0, weight=1)
+        top.grid_columnconfigure(1, weight=2)
+        top.grid_rowconfigure(0, weight=1)
+        self.build_control_card(top, 0, 0)
+        self.build_result_card(top, 0, 1)
 
+        # BOTTOM AREA: secondary tools only. Even if this area is small, copy stays visible above.
+        bottom = tk.Frame(body, bg=BG)
+        bottom.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_columnconfigure(1, weight=2)
+        bottom.grid_rowconfigure(0, weight=1)
+        self.build_dataset_card(bottom, 0, 0)
+        self.build_add_card(bottom, 0, 1)
+
+        self.build_status_bar()
+
+    def build_header(self) -> None:
+        header = tk.Frame(self.root, bg=HEADER, height=78)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        header.grid_propagate(False)
+
+        logo_holder = tk.Frame(header, bg=HEADER)
+        logo_holder.grid(row=0, column=0, padx=(22, 14), pady=14, sticky="w")
+        try:
+            self.logo_image = tk.PhotoImage(file=resource_path("icon.png"))
+            scale = max(1, self.logo_image.width() // 46)
+            self.logo_image = self.logo_image.subsample(scale)
+            tk.Label(logo_holder, image=self.logo_image, bg=HEADER).pack()
+        except Exception:
+            tk.Label(logo_holder, text="US", bg=PRIMARY, fg="white", font=("Segoe UI", 14, "bold"), padx=10, pady=8).pack()
+
+        title_area = tk.Frame(header, bg=HEADER)
+        title_area.grid(row=0, column=1, sticky="w")
+        tk.Label(
+            title_area,
+            text=f"{APP_NAME} {APP_VERSION}",
+            bg=HEADER,
+            fg="white",
+            font=("Segoe UI", 19, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            title_area,
+            text="Type a number and copy usernames instantly.",
+            bg=HEADER,
+            fg="#CBD5E1",
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(2, 0))
+
+        tk.Label(
+            header,
+            text="Auto Shuffle ON",
+            bg="#DCFCE7",
+            fg="#166534",
+            font=("Segoe UI", 10, "bold"),
+            padx=12,
+            pady=6,
+        ).grid(row=0, column=2, padx=22, sticky="e")
+
+    def build_status_bar(self) -> None:
         status_bar = tk.Frame(self.root, bg="#DBEAFE", height=34)
         status_bar.grid(row=2, column=0, sticky="ew")
         status_bar.grid_columnconfigure(0, weight=1)
+        status_bar.grid_propagate(False)
         tk.Label(
             status_bar,
             textvariable=self.status_var,
@@ -263,193 +510,134 @@ class UsernameShufflerApp:
             font=("Segoe UI", 10, "bold"),
             anchor="w",
             padx=18,
-        ).grid(row=0, column=0, sticky="ew", ipady=7)
+        ).grid(row=0, column=0, sticky="nsew", ipady=7)
 
-    def build_header(self) -> None:
-        header = tk.Frame(self.root, bg=HEADER, height=105)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_columnconfigure(1, weight=1)
-        header.grid_propagate(False)
-
-        logo_holder = tk.Frame(header, bg=HEADER)
-        logo_holder.grid(row=0, column=0, padx=(24, 14), pady=22, sticky="w")
-        try:
-            self.logo_image = tk.PhotoImage(file=resource_path("icon.png"))
-            self.logo_image = self.logo_image.subsample(max(1, self.logo_image.width() // 56))
-            tk.Label(logo_holder, image=self.logo_image, bg=HEADER).pack()
-        except Exception:
-            tk.Label(
-                logo_holder,
-                text="US",
-                bg=PRIMARY,
-                fg="white",
-                font=("Segoe UI", 18, "bold"),
-                width=3,
-                height=1,
-            ).pack()
-
-        title_area = tk.Frame(header, bg=HEADER)
-        title_area.grid(row=0, column=1, sticky="w", pady=18)
-        tk.Label(
-            title_area,
-            text=f"{APP_NAME} {APP_VERSION}",
-            bg=HEADER,
-            fg="white",
-            font=("Segoe UI", 22, "bold"),
-        ).pack(anchor="w")
-        tk.Label(
-            title_area,
-            text="Instant random picks from your Excel or CSV username list",
-            bg=HEADER,
-            fg="#CBD5E1",
-            font=("Segoe UI", 10),
-        ).pack(anchor="w", pady=(4, 0))
-
-        status_pill = tk.Label(
-            header,
-            text="Auto Shuffle ON",
-            bg="#DCFCE7",
-            fg="#166534",
-            font=("Segoe UI", 10, "bold"),
-            padx=12,
-            pady=6,
-        )
-        status_pill.grid(row=0, column=2, padx=24, sticky="e")
-
-    def card(self, parent: tk.Widget, row: int, column: int, *, columnspan: int = 1, sticky: str = "nsew") -> tk.Frame:
+    def card(self, parent: tk.Widget, row: int, column: int, *, sticky: str = "nsew") -> tk.Frame:
         shadow = tk.Frame(parent, bg=SHADOW)
-        shadow.grid(row=row, column=column, columnspan=columnspan, sticky=sticky, padx=8, pady=8)
+        shadow.grid(row=row, column=column, sticky=sticky, padx=7, pady=7)
         shadow.grid_columnconfigure(0, weight=1)
         shadow.grid_rowconfigure(0, weight=1)
         inner = tk.Frame(shadow, bg=CARD, highlightbackground=CARD_BORDER, highlightthickness=1)
         inner.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 4))
         return inner
 
-    def build_stats_card(self, parent: tk.Widget) -> None:
-        card = self.card(parent, 0, 0)
-        card.grid_columnconfigure(1, weight=1)
-
-        tk.Label(card, text="Dataset", bg=CARD, fg=TEXT, font=("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 10)
-        )
-        self.metric_row(card, 1, "Current file", self.file_var)
-        self.metric_row(card, 2, "Loaded usernames", self.total_var)
-        self.metric_row(card, 3, "Current result", self.pick_var)
-
-    def metric_row(self, parent: tk.Widget, row: int, label: str, value_var: tk.StringVar) -> None:
-        tk.Label(parent, text=label, bg=CARD, fg=MUTED, font=("Segoe UI", 10)).grid(
-            row=row, column=0, sticky="w", padx=18, pady=5
-        )
-        tk.Label(parent, textvariable=value_var, bg=CARD, fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="e").grid(
-            row=row, column=1, sticky="ew", padx=18, pady=5
-        )
-
-    def build_shuffle_card(self, parent: tk.Widget) -> None:
-        card = self.card(parent, 0, 1)
+    def build_control_card(self, parent: tk.Widget, row: int, column: int) -> None:
+        card = self.card(parent, row, column)
         card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(1, weight=1)
+        card.grid_rowconfigure(4, weight=1)
 
-        tk.Label(card, text="Shuffle Control", bg=CARD, fg=TEXT, font=("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(16, 8)
+        tk.Label(card, text="Pick Amount", bg=CARD, fg=TEXT, font=("Segoe UI", 15, "bold")).grid(
+            row=0, column=0, sticky="w", padx=18, pady=(16, 4)
         )
-        tk.Label(card, text="Type a number. Result updates instantly.", bg=CARD, fg=MUTED, font=("Segoe UI", 10)).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=18, pady=(0, 10)
+        tk.Label(card, text="Type only the number. No Enter key needed.", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).grid(
+            row=1, column=0, sticky="w", padx=18, pady=(0, 10)
         )
 
-        entry = tk.Entry(
+        self.count_entry = tk.Entry(
             card,
             textvariable=self.count_var,
             justify="center",
             bg="#F8FAFC",
             fg=TEXT,
             insertbackground=TEXT,
-            font=("Segoe UI", 24, "bold"),
+            font=("Segoe UI", 30, "bold"),
             relief="solid",
             bd=1,
             highlightthickness=2,
             highlightbackground="#BFDBFE",
             highlightcolor=PRIMARY,
         )
-        entry.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 14), ipady=8)
-        self.count_entry = entry
+        self.count_entry.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 12), ipady=8)
 
-        self.button(card, "Re-shuffle", PRIMARY, PRIMARY_HOVER, self.shuffle_manual).grid(
-            row=3, column=0, sticky="ew", padx=(18, 6), pady=(0, 16), ipady=6
+        action_row = tk.Frame(card, bg=CARD)
+        action_row.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 10))
+        action_row.grid_columnconfigure(0, weight=1)
+        action_row.grid_columnconfigure(1, weight=1)
+        self.button(action_row, "Re-shuffle", PRIMARY, PRIMARY_HOVER, self.shuffle_manual).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6), ipady=7
         )
-        self.button(card, "Reload Sheet", GREEN, GREEN_HOVER, lambda: self.load_data_async(initial=False)).grid(
-            row=3, column=1, sticky="ew", padx=(6, 18), pady=(0, 16), ipady=6
+        self.button(action_row, "Reload Sheet", GREEN, GREEN_HOVER, lambda: self.load_data_async(initial=False)).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0), ipady=7
         )
 
-    def build_result_card(self, parent: tk.Widget) -> None:
-        card = self.card(parent, 1, 0, columnspan=2)
-        card.grid_rowconfigure(1, weight=1)
+        quick = tk.Frame(card, bg="#F8FAFC", highlightbackground="#E2E8F0", highlightthickness=1)
+        quick.grid(row=4, column=0, sticky="nsew", padx=18, pady=(0, 16))
+        quick.grid_columnconfigure(1, weight=1)
+        self.metric_row(quick, 0, "File", self.file_var)
+        self.metric_row(quick, 1, "Loaded", self.total_var)
+        self.metric_row(quick, 2, "Result", self.pick_var)
+
+    def build_result_card(self, parent: tk.Widget, row: int, column: int) -> None:
+        card = self.card(parent, row, column)
         card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(1, weight=1)
 
-        top = tk.Frame(card, bg=CARD)
-        top.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
-        top.grid_columnconfigure(0, weight=1)
-        tk.Label(top, text="Result", bg=CARD, fg=TEXT, font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
-        self.button(top, "Copy Result", CYAN, CYAN_HOVER, self.copy_result, width=14).grid(row=0, column=1, sticky="e")
+        header = tk.Frame(card, bg=CARD)
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text="Username Copy Area", bg=CARD, fg=TEXT, font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w")
+        self.copy_btn = self.button(header, "COPY RESULT", CYAN, CYAN_HOVER, self.copy_result, width=16)
+        self.copy_btn.grid(row=0, column=1, sticky="e")
 
-        text_frame = tk.Frame(card, bg="#E2E8F0")
-        text_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 16))
-        text_frame.grid_columnconfigure(0, weight=1)
-        text_frame.grid_rowconfigure(0, weight=1)
-
+        result_frame = tk.Frame(card, bg="#D7E0EE")
+        result_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 16))
+        result_frame.grid_columnconfigure(0, weight=1)
+        result_frame.grid_rowconfigure(0, weight=1)
         self.output_box = tk.Text(
-            text_frame,
-            height=5,
+            result_frame,
+            height=8,
             wrap="word",
             bg="#F8FAFC",
             fg=TEXT,
             relief="flat",
-            font=("Consolas", 12),
+            font=("Consolas", 13),
             padx=12,
             pady=12,
+            undo=False,
         )
         self.output_box.grid(row=0, column=0, sticky="nsew", padx=(0, 1), pady=(0, 1))
-        self.output_box.insert("1.0", "Type a number above to generate shuffled usernames instantly.")
         self.output_box.configure(state="disabled")
 
-    def build_add_card(self, parent: tk.Widget) -> None:
-        card = self.card(parent, 2, 0, columnspan=2)
+    def build_dataset_card(self, parent: tk.Widget, row: int, column: int) -> None:
+        card = self.card(parent, row, column)
         card.grid_columnconfigure(0, weight=1)
-
-        tk.Label(card, text="Add New Usernames", bg=CARD, fg=TEXT, font=("Segoe UI", 14, "bold")).grid(
-            row=0, column=0, sticky="w", padx=18, pady=(16, 4)
+        card.grid_columnconfigure(1, weight=1)
+        tk.Label(card, text="Dataset", bg=CARD, fg=TEXT, font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=18, pady=(15, 8)
         )
-        tk.Label(
-            card,
-            text="Paste one username per line. Comma or semicolon separated batches also work.",
-            bg=CARD,
-            fg=MUTED,
-            font=("Segoe UI", 10),
-        ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 8))
+        self.metric_row(card, 1, "Current file", self.file_var)
+        self.metric_row(card, 2, "Loaded usernames", self.total_var)
+        self.metric_row(card, 3, "Current result", self.pick_var)
 
-        self.add_box = tk.Text(
-            card,
-            height=4,
-            wrap="word",
-            bg="#F8FAFC",
-            fg=TEXT,
-            relief="solid",
-            bd=1,
-            font=("Segoe UI", 10),
-            padx=10,
-            pady=8,
+
+    def metric_row(self, parent: tk.Widget, row: int, label: str, value_var: tk.StringVar) -> None:
+        tk.Label(parent, text=label, bg=parent.cget("bg"), fg=MUTED, font=("Segoe UI", 10)).grid(
+            row=row, column=0, sticky="w", padx=12 if str(parent.cget("bg")) == "#F8FAFC" else 18, pady=5
         )
-        self.add_box.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
+        tk.Label(parent, textvariable=value_var, bg=parent.cget("bg"), fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="e").grid(
+            row=row, column=1, sticky="ew", padx=12 if str(parent.cget("bg")) == "#F8FAFC" else 18, pady=5
+        )
+
+    def build_add_card(self, parent: tk.Widget, row: int, column: int) -> None:
+        card = self.card(parent, row, column)
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(1, weight=1)
+
+        header = tk.Frame(card, bg=CARD)
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(15, 6))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text="Add New Usernames", bg=CARD, fg=TEXT, font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(header, text="One per line. Comma or semicolon batches also work.", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        self.add_box = tk.Text(card, height=4, wrap="word", bg="#F8FAFC", fg=TEXT, relief="solid", bd=1, font=("Segoe UI", 10), padx=10, pady=8)
+        self.add_box.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 8))
 
         actions = tk.Frame(card, bg=CARD)
-        actions.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 16))
+        actions.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 14))
         actions.grid_columnconfigure(0, weight=1)
         actions.grid_columnconfigure(1, weight=1)
-        self.button(actions, "Save to Excel/CSV", ORANGE, ORANGE_HOVER, self.save_new_usernames).grid(
-            row=0, column=0, sticky="ew", padx=(0, 6), ipady=6
-        )
-        self.button(actions, "Clear Box", "#475569", "#334155", self.clear_add_box).grid(
-            row=0, column=1, sticky="ew", padx=(6, 0), ipady=6
-        )
+        self.button(actions, "Save to Excel/CSV", ORANGE, ORANGE_HOVER, self.save_new_usernames).grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=6)
+        self.button(actions, "Clear Box", SLATE, SLATE_HOVER, self.clear_add_box).grid(row=0, column=1, sticky="ew", padx=(6, 0), ipady=6)
 
     def button(self, parent: tk.Widget, text: str, bg: str, hover: str, command, width: int | None = None) -> tk.Button:
         button = tk.Button(
@@ -474,7 +662,6 @@ class UsernameShufflerApp:
     def set_status(self, message: str, *, error: bool = False) -> None:
         self.status_var.set(message)
         if error:
-            # Keep the app non-intrusive: errors stay in the status bar.
             self.root.bell()
 
     def set_output(self, text: str) -> None:
@@ -505,31 +692,24 @@ class UsernameShufflerApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def finish_load(
-        self,
-        names: list[str],
-        path: str | None,
-        warning: str | None,
-        error: str | None,
-        initial: bool,
-    ) -> None:
+    def finish_load(self, names: list[str], path: str | None, warning: str | None, error: str | None, initial: bool) -> None:
         self.usernames = names
         self.loaded_file = path
         self.result_text = ""
         self.update_metrics()
 
         if error:
-            self.set_output("Could not load usernames. Check the status message below.")
+            self.set_output("")
             self.set_status(f"Load error: {error}", error=True)
         elif warning:
-            self.set_output("No usernames loaded yet. Add usernames below and save them to start.")
+            self.set_output("")
             self.set_status(warning)
         else:
             self.set_status(f"Loaded {len(names)} usernames from {os.path.basename(path or '')}.")
             if self.count_var.get().strip():
                 self.shuffle_names(automatic=True)
             else:
-                self.set_output("Type a number above to generate shuffled usernames instantly.")
+                self.set_output("")
 
         if initial:
             self.count_entry.focus_force()
@@ -548,7 +728,7 @@ class UsernameShufflerApp:
         if not raw_value:
             self.result_text = ""
             self.pick_var.set("0")
-            self.set_output("Type a number above to generate shuffled usernames instantly.")
+            self.set_output("")
             if self.usernames:
                 self.set_status(f"Ready. {len(self.usernames)} usernames loaded.")
             return
@@ -556,7 +736,7 @@ class UsernameShufflerApp:
         if not raw_value.isdigit():
             self.result_text = ""
             self.pick_var.set("0")
-            self.set_output("Only numbers are accepted here.")
+            self.set_output("")
             self.set_status("Enter a valid positive number.", error=not automatic)
             return
 
@@ -564,21 +744,21 @@ class UsernameShufflerApp:
         if amount <= 0:
             self.result_text = ""
             self.pick_var.set("0")
-            self.set_output("Number must be greater than 0.")
+            self.set_output("")
             self.set_status("Enter a number greater than 0.", error=not automatic)
             return
 
         if not self.usernames:
             self.result_text = ""
             self.pick_var.set("0")
-            self.set_output("No usernames available yet. Add usernames below and save them first.")
-            self.set_status("No usernames loaded. Save usernames to create a sheet.", error=not automatic)
+            self.set_output("")
+            self.set_status("No usernames loaded. Save usernames to create usernames.xlsx.", error=not automatic)
             return
 
         if amount > len(self.usernames):
             self.result_text = ""
             self.pick_var.set("0")
-            self.set_output(f"You asked for {amount}, but only {len(self.usernames)} usernames are loaded.")
+            self.set_output("")
             self.set_status("Pick count cannot be larger than loaded usernames.", error=not automatic)
             return
 
@@ -631,11 +811,12 @@ class UsernameShufflerApp:
         if not target_path or target_path.lower().endswith(".xls"):
             target_path = os.path.join(self.folder, "usernames.xlsx")
 
+        existing_snapshot = list(self.usernames)
         self.set_status("Saving new usernames...")
 
         def worker() -> None:
             try:
-                saved_path = append_usernames_to_file(target_path, unique_new)
+                saved_path = append_usernames_to_file(target_path, unique_new, existing_snapshot)
                 error = None
             except Exception as exc:
                 saved_path = target_path
@@ -661,7 +842,20 @@ class UsernameShufflerApp:
             self.shuffle_names(automatic=True)
 
 
+def set_windows_app_id() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        app_id = f"ShowravZaman.UsernameShuffler.{APP_VERSION}"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    set_windows_app_id()
     root = tk.Tk()
     UsernameShufflerApp(root)
     root.mainloop()
