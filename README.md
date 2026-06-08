@@ -2,28 +2,50 @@
 
 A clean desktop app for instantly shuffling usernames from an Excel or CSV file.
 
-## Run
+<p align="center">
+  <img width="800" alt="Username Shuffler v2.0.0" src="https://github.com/user-attachments/assets/ddc83302-2534-4fd4-a3e9-014d77f9f6ce" />
+</p>
 
-Put your username Excel/CSV file in the same folder as the app files, then double-click:
+## Features
+
+* Instantly shuffle usernames after typing a number
+* Copy shuffled usernames with one click
+* Add and save new usernames to Excel/CSV
+* Works with `.xlsx`, `.xlsm`, and `.csv` files
+* No annoying popup while loading usernames
+* Clean and professional desktop UI
+* Custom app icon support
+
+## How to Use
+
+1. Download the latest release.
+2. Extract the ZIP file.
+3. Place your username Excel/CSV file in the same folder.
+4. Open `Run-App.bat`.
+5. Type how many usernames you want.
+6. Click **Copy Result** to copy the shuffled usernames.
+
+## Username File Format
+
+Your Excel or CSV file should contain usernames in a column.
+
+Example:
 
 ```text
-Run-App.bat
+username1
+username2
+username3
+username4
 ```
+
+The app will automatically detect and load the username list from the file.
 
 ## Notes
 
-- The zip is flat now. There is no extra folder inside the zip.
-- The copy result area stays visible in the default window size.
-- The title-bar icon uses `titlebar.ico`, and the EXE build uses `icon.ico`.
-- `.xlsx`, `.xlsm`, and `.csv` loading works without openpyxl.
-- Saving new usernames creates or updates `usernames.xlsx` when needed.
+* Keep your username file in the same folder as the app.
+* Duplicate usernames are skipped when saving new usernames.
+* The app is made with Python.
 
-## Build EXE on Windows
+## Version
 
-Double-click:
-
-```text
-build_windows.bat
-```
-
-The EXE will be created in the `dist` folder.
+Current version: `v2.0.0`
