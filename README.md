@@ -13,8 +13,6 @@ A clean desktop app for instantly shuffling usernames from an Excel or CSV file.
 * Add and save new usernames to Excel/CSV
 * Works with `.xlsx`, `.xlsm`, and `.csv` files
 * No annoying popup while loading usernames
-* Clean and professional desktop UI
-* Custom app icon support
 
 ## How to Use
 
