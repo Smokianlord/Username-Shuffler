@@ -1,22 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
-
-hiddenimports = collect_submodules('openpyxl')
-
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.'), ('icon.png', '.')],
-    hiddenimports=hiddenimports,
+    datas=[
+        ('icon.png', '.'),
+        ('icon.ico', '.'),
+        ('titlebar.ico', '.')
+    ],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pandas', 'numpy', 'matplotlib', 'scipy'],
+    excludes=[
+        'numpy', 'scipy', 'pandas', 'matplotlib', 'torch',
+        'tensorflow', 'onnxruntime', 'selenium', 'playwright',
+        'trio', 'anyio', 'pytest', 'unittest', 'IPython', 'jupyter',
+        'rembg', 'av', 'faster_whisper', 'ctranslate2'
+    ],
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

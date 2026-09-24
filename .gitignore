@@ -3,3 +3,5 @@ build/
 dist/
 *.spec.bak
 *.pyc
+.settings/
+settings.json

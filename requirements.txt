@@ -1,2 +1,11 @@
-# No runtime dependency needed.
-# PyInstaller is only needed if you want to build the EXE.
+# Runtime:
+# No external runtime dependencies are required. Username Shuffler runs
+# entirely on the Python Standard Library (tkinter, xml.etree, csv, zipfile).
+
+# Optional runtime enhancements:
+# darkdetect>=0.8.0     # Automatic Windows system Dark/Light theme detection
+# openpyxl>=3.1.0       # Fallback engine for complex multi-sheet Excel files
+
+# Build dependencies (only required to compile standalone Windows .exe):
+pyinstaller>=6.0.0
+pillow>=10.0.0

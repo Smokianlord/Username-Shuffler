@@ -1,19 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 a = Analysis(
     ['Username-Shuffler.pyw'],
     pathex=[],
     binaries=[],
-    datas=[('icon.png', '.'), ('icon.ico', '.'), ('titlebar.ico', '.')],
+    datas=[
+        ('icon.png', '.'),
+        ('icon.ico', '.'),
+        ('titlebar.ico', '.')
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'numpy', 'scipy', 'pandas', 'matplotlib', 'torch',
+        'tensorflow', 'onnxruntime', 'selenium', 'playwright',
+        'trio', 'anyio', 'pytest', 'unittest', 'IPython', 'jupyter',
+        'rembg', 'av', 'faster_whisper', 'ctranslate2'
+    ],
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
