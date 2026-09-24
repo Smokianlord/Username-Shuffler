@@ -7,10 +7,6 @@
 
 A modern, high-performance desktop application for instantly shuffling, formatting, managing, and exporting usernames from Excel (`.xlsx`, `.xlsm`), CSV, and Plain Text (`.txt`) files.
 
-<p align="center">
-  <img width="800" alt="Username Shuffler" src="https://github.com/user-attachments/assets/ddc83302-2534-4fd4-a3e9-014d77f9f6ce" />
-</p>
-
 ---
 
 ## ✨ Features
