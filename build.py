@@ -137,16 +137,11 @@ GitHub Repository: https://github.com/Smokianlord/Username-Shuffler
 
     zip_size_mb = os.path.getsize(RELEASE_ZIP) / (1024 * 1024)
     zip_sha = calculate_sha256(RELEASE_ZIP)
-    exe_sha = calculate_sha256(root_exe)
+    exe_sha = calculate_sha256(exe_path) if os.path.exists(exe_path) else calculate_sha256(root_exe)
 
-    # Clean up staging directory and loose exe from dist/
+    # Clean up temporary staging directory
     if os.path.exists(RELEASE_DIR):
         shutil.rmtree(RELEASE_DIR)
-    if os.path.exists(exe_path):
-        try:
-            os.remove(exe_path)
-        except Exception:
-            pass
 
     print("\n==================================================")
     print(" BUILD SUCCESSFUL!")

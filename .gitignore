@@ -1,7 +1,48 @@
-__pycache__/
+# Compiled binaries and executables
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+
+# Build & packaging artifacts
 build/
 dist/
 *.spec.bak
-*.pyc
+*.egg-info/
+*.egg
+
+# Archives & checksums
+*.zip
+*.tar.gz
+*.sha256
+
+# Byte-compiled / optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE & Editor files
+.vscode/
+.idea/
 .settings/
 settings.json
+*.swp
+*.swo
+*~
+
+# Operating system files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Temporary & Lock files
+~$*.xlsx
+~$*.xlsm
+*.log
