@@ -710,7 +710,7 @@ class UsernameShufflerApp:
     # ------------------------------------------------------------------------
 
     def configure_window(self) -> None:
-        self.root.title(f"{APP_NAME} {APP_VERSION} - {APP_SUBTITLE}")
+        self.root.title(f"{APP_NAME} {APP_VERSION}")
         saved_geom = self.config.get("window_geometry", "1040x680")
         self.root.geometry(saved_geom)
         self.root.minsize(920, 580)
