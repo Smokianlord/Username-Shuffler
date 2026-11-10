@@ -46,6 +46,3 @@ desktop.ini
 ~$*.xlsx
 ~$*.xlsm
 *.log
-
-# Personal username list (kept locally, not shared)
-Username Dataset.xlsx
