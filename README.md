@@ -55,7 +55,3 @@ python build.py
 ```
 
 The exe and ZIP are created in `dist/`.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
